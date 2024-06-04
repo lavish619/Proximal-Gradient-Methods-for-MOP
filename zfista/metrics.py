@@ -2,8 +2,17 @@ from typing import Dict, List, Tuple
 
 import numpy as np
 from pymoo.indicators.hv import Hypervolume
+from pymoo.indicators.gd import GD
+from pymoo.indicators.gd_plus import GDPlus
+from pymoo.indicators.igd import IGD
+from pymoo.indicators.igd_plus import IGDPlus
+from pymoo.indicators.spacing import SpacingIndicator
+
 from pymoo.util.nds.non_dominated_sorting import NonDominatedSorting
 from scipy.optimize import OptimizeResult
+import os
+import pickle
+
 
 
 def extract_function_values(res: List[OptimizeResult]) -> np.ndarray:
@@ -96,7 +105,8 @@ def spread_metrics(front: np.ndarray, front_true: np.ndarray) -> Tuple[float, fl
 
 
 def calculate_metrics(
-    *named_results: Tuple[str, List[OptimizeResult]]
+    *named_results: Tuple[str, List[OptimizeResult]],
+    directory: str = None
 ) -> Tuple[Dict[str, Dict[str, float]], Dict[str, Dict[str, float]]]:
     """
     Calculate a variety of performance metrics for a set of named optimization results.
@@ -112,11 +122,32 @@ def calculate_metrics(
         A pair of dictionaries containing the metrics and performance ratios for each optimization result.
     """
     result_names, results = zip(*named_results)
+    
+    '''
+    ## Orignal Code of zfista repo for calculating true pareto front.
+    ## Performs NonDominated Sorting of multiple fronts obtained from different algorithms
+
     fronts = [
         extract_non_dominated_points(extract_function_values(res)) for res in results
     ]
     front_true = extract_non_dominated_points(np.concatenate(fronts, axis=0))
+    '''
 
+    fronts = [
+        extract_function_values(res) for res in results
+    ]
+
+    if directory is None:
+        front_true = extract_non_dominated_points(np.concatenate(fronts, axis=0))
+    else:
+        ## Loading True pareto front from beta=0 (PGM) expts 
+        with open(os.path.join(directory, "normal_results.pkl"), "rb") as f:
+            results_true_front = pickle.load(f)
+        true_fronts = [
+            extract_function_values(results_true_front)
+        ]
+        front_true = extract_non_dominated_points(np.concatenate(true_fronts, axis=0))
+    
     intersections = [
         np.array(
             list(
@@ -136,6 +167,16 @@ def calculate_metrics(
     gammas, deltas = zip(*spread_values)
 
     hvs = [Hypervolume(pf=front_true)(front) for front in fronts]
+
+    gds = [GD(pf=front_true)(front) for front in fronts]
+    
+    gdplus = [GDPlus(pf=front_true)(front) for front in fronts]
+    
+    igds = [IGD(pf=front_true)(front) for front in fronts]
+    
+    igdplus = [IGDPlus(pf=front_true)(front) for front in fronts]
+
+    spacing = [SpacingIndicator(pf=front_true)(front) for front in fronts]
 
     error_rates = [
         np.mean([not res.success for res in res_list]) for res_list in results
@@ -159,6 +200,11 @@ def calculate_metrics(
         "Gamma": dict(zip(result_names, gammas)),
         "Delta": dict(zip(result_names, deltas)),
         "Purity": dict(zip(result_names, purities)),
+        "GD": dict(zip(result_names, gds)),
+        "GD+": dict(zip(result_names, gdplus)),
+        "IGD": dict(zip(result_names, igds)),
+        "IGD+": dict(zip(result_names, igdplus)),
+        "Spacing": dict(zip(result_names, spacing)),
         "Error rate": dict(zip(result_names, error_rates)),
         "Avg computation time": dict(zip(result_names, avg_times)),
         "Avg iterations": dict(zip(result_names, avg_nits)),

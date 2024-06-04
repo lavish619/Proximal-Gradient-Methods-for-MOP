@@ -36,6 +36,7 @@ def _solve_subproblem(
     lr: float,
     xk_old: np.ndarray,
     yk: np.ndarray,
+    zk: np.ndarray,
     w0: Optional[np.ndarray],
     tol: float = 1e-12,
     max_iter: int = 1000,
@@ -97,6 +98,8 @@ def _solve_subproblem(
 
     yk : array, shape (n_features,)
 
+    zk : array, shape (n_features,)
+
     w0 : None or array, shape (n_objectives,)
         Initial guess for the dual problem.
 
@@ -129,7 +132,8 @@ def _solve_subproblem(
     nit : int
         Total number of iterations in the solver.
     """
-    f_yk = f(yk)
+    #replacing yk by zk in the original code, as when inertia is not enabled, zk is equivalent to yk.
+    f_yk = f(zk)
     F_xk_old = f(xk_old) + g(xk_old)
     jac_f_yk = jac_f(yk)
     n_objectives = f_yk.shape[0] if isinstance(f_yk, np.ndarray) else 1
@@ -197,6 +201,48 @@ def _solve_subproblem(
     return res
 
 
+def _solve_proximal_gradient(
+    f: Callable,
+    g: Callable,
+    jac_f: Callable,
+    prox_wsum_g: Callable,
+    yk: np.ndarray,
+    zk: np.ndarray,
+    w0: Optional[np.ndarray],
+    lr: float = 1,
+    max_iter: int = 1000000,
+    tol: float = 1e-12,
+) -> OptimizeResult:
+    
+    f_yk = f(zk)
+    jac_f_yk = jac_f(yk) 
+    #replacing yk by zk in the original code, as when inertia is not enabled, zk is equivalent to yk.
+
+    n_objectives = f_yk.shape[0] if isinstance(f_yk, np.ndarray) else 1
+    n_features = yk.shape[0]
+    
+    def _minimized_fun_jac(u: np.ndarray) -> float: #Tuple[float, np.ndarray]:
+        
+        phi_x = np.inner(jac_f_yk, u - zk) + g(u) - g(zk)
+        x_argmax = np.argmax(phi_x, axis=0)
+        fun = np.linalg.norm(u - zk) ** 2 / 2 / lr + phi_x[x_argmax]
+        
+        return fun
+
+    res = OptimizeResult()
+    
+    res = minimize(
+        fun=_minimized_fun_jac,
+        x0=w0,
+        method="trust-constr",
+        hess=BFGS(),
+        options={"gtol": tol, "xtol": tol, "barrier_tol": tol, "maxiter": max_iter},
+    )
+    if not res.success:
+        warn(res.message)
+
+    return res
+
 def minimize_proximal_gradient(
     f: Callable,
     g: Callable,
@@ -213,6 +259,8 @@ def minimize_proximal_gradient(
     decay_rate: float = 0.5,
     nesterov: bool = False,
     nesterov_ratio: Tuple[float, float] = (0, 0.25),
+    inertial: bool = False,
+    inertial_params: Tuple[float, float] = (0, 0),
     return_all: bool = False,
     verbose: bool = False,
     deprecated: bool = False,
@@ -281,6 +329,15 @@ def minimize_proximal_gradient(
     nesterov_ratio : tuple of floats (a, b), default=(0, 0.25)
         Coefficients used for updating stepsize: :math:`t_{k + 1} = \sqrt{t_k^2 - a t_k + b} + 0.5`
         If ``nesterov`` is ``False``, then ``nesterov_ratio`` will be ignored.
+    
+    inertia : bool, default=False
+        If True, enable inertial acceleration of cGIPGM paper.
+    
+    inertial_params : tuple of floats (alpha, beta), default=(0, 0)
+        Coefficients used for updating stepsize: 
+        :math:`y_{k + 1} = x_k + \alpha (x_k - x_{k - 1})` and
+        :math:`z_{k + 1} = x_k + \beta (x_k - x_{k - 1})`
+        If ``inertia`` is ``False``, then ``inertial_params`` will be ignored.
 
     return_all : bool, default=False
         If True, return lists of the sequence :math:`\{x^k\}` and the error criteria :math:`\|x^k - y^k\|_\infty`.
@@ -347,6 +404,7 @@ def minimize_proximal_gradient(
     xk_old = x0
     xk = x0
     yk = x0
+    zk = x0
     nit_internal = 0
     f_x0 = f(x0)
     n_objectives = f_x0.shape[0] if isinstance(f_x0, np.ndarray) else 1
@@ -362,18 +420,32 @@ def minimize_proximal_gradient(
         backtrack_iter = 0
         while True:
             try:
-                subproblem_result = _solve_subproblem(
+                # subproblem_result = _solve_subproblem(
+                #     f,
+                #     g,
+                #     jac_f,
+                #     prox_wsum_g,
+                #     lr,
+                #     xk_old,
+                #     yk,
+                #     zk,
+                #     w0,
+                #     tol=tol_internal,
+                #     max_iter=max_iter_internal,
+                #     deprecated=deprecated,
+                # )
+                subproblem_result = _solve_proximal_gradient(
                     f,
                     g,
                     jac_f,
                     prox_wsum_g,
-                    lr,
-                    xk_old,
                     yk,
-                    w0,
-                    tol=tol_internal,
+                    zk,
+                    # x0,
+                    np.zeros(x0.shape),
+                    lr,
                     max_iter=max_iter_internal,
-                    deprecated=deprecated,
+                    tol=tol_internal
                 )
                 xk = subproblem_result.x
                 F_xk = f(xk) + g(xk)
@@ -419,7 +491,8 @@ def minimize_proximal_gradient(
                     error_res.allerrs = allerrs
                 error_res.time = time.time() - start_time
                 return error_res
-        error_criterion = max(abs(xk - yk))
+        # error_criterion = max(abs(xk - yk))
+        error_criterion = max(abs(xk - xk_old))
         if return_all:
             allvecs.append(xk)
             allfuns.append(F_xk)
@@ -433,8 +506,13 @@ def minimize_proximal_gradient(
             moment = (nesterov_tk_old - 1) / nesterov_tk
             yk = xk + moment * (xk - xk_old)
             nesterov_tk_old = nesterov_tk
+            zk = yk
+        elif inertial:
+            yk = xk + inertial_params[0] * (xk - xk_old)
+            zk = xk + inertial_params[1] * (xk - xk_old)
         else:
             yk = xk
+            zk = xk
         xk_old = xk
     else:
         res.status = 0

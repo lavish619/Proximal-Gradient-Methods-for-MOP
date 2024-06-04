@@ -1,6 +1,6 @@
 import argparse
 
-from benchmarks.benchmark import main
+from benchmarks.benchmark_inertial import main
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
